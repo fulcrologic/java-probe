@@ -1,0 +1,8 @@
+{:paths   ["src/main"]
+
+ :deps    {com.github.javaparser/javaparser-core {:mvn/version "3.26.1"}
+           com.taoensso/encore                   {:mvn/version "3.133.0"}
+           org.jsoup/jsoup                       {:mvn/version "1.16.2"}
+           io.github.classgraph/classgraph       {:mvn/version "4.8.177"}}
+
+ :aliases {:dev {:extra-deps {org.clojure/clojure {:mvn/version "1.11.4"}}}}}
