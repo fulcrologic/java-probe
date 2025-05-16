@@ -1,5 +1,7 @@
 # Clojure REPL Commands For Java Info
 
+![](https://clojars.org/com.fulcrologic/java-probe/latest-version.svg)
+
 This is a small library with REPL tools that are intended to be used by nREPL-based MCP tools and AI. The idea is that when you are working with Java libraries in Clojure this will enable you to start an nREPL, and have an nREPL MCP be able to ask for javadoc or even the Java source code of classes and methods. The AI can then automatically build a much better (and compact) context window for very specific Java things.
 
 The basic way this works is as follows:
