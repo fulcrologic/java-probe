@@ -1,8 +1,7 @@
 (ns com.fulcrologic.java-info.java-info-impl
   (:require [clojure.java.io :as io]
-            [clojure.java.shell :refer [sh]]
             [clojure.string :as str]
-            [taoensso.encore :as enc])
+            [clojure.tools.deps.alpha :as deps])
   (:import
     (com.github.javaparser StaticJavaParser)
     (com.github.javaparser.ast.body ClassOrInterfaceDeclaration MethodDeclaration)
@@ -80,7 +79,7 @@
         nil))))
 
 (defn download-sources [{:keys [group-id artifact-id version] :as coords}]
-  "Downloads source JAR for a Maven artifact using the mvn dependency:get command.
+  "Downloads source JAR for a Maven artifact using tools.deps.
 
    Parameters:
    - coords: A map containing Maven coordinates with keys :group-id, :artifact-id, and :version.
@@ -89,16 +88,39 @@
    nil if successful.
 
    Throws:
-   Exception if the download fails for any reason."
-  (let [artifact-str (format "%s:%s:%s:jar:sources" group-id artifact-id version)]
-    (try
-      (let [{:keys [exit out err]} (sh "mvn" "dependency:get"
-                                     (str "-Dartifact=" artifact-str))]
-        (when-not (zero? exit)
-          (throw (ex-info (str "Failed to download sources: " out) {}))))
-      (catch Exception e
-        (throw (ex-info "Error downloading sources"
-                 {:coords coords} e))))))
+   Exception if the download fails for any reason.
+
+   Note: For many Clojure libraries, source code comes with the main jar, not in a separate
+   sources jar. This function only downloads separate source jars when they exist."
+  (try
+    ;; First try to download the regular library to ensure it exists in local repo
+    (let [lib-sym   (symbol (str group-id "/" artifact-id))
+          lib-coord {:mvn/version version}
+          base-deps {:deps      {lib-sym lib-coord}
+                     :mvn/repos {"central" {:url "https://repo1.maven.org/maven2/"}
+                                 "clojars" {:url "https://repo.clojars.org/"}}}
+          resolved  (deps/resolve-deps base-deps nil)]
+
+      ;; Now try to download sources if they exist as a separate jar
+      (try
+        (let [sources-sym (symbol (str group-id "/" artifact-id "$sources"))
+              source-deps {:deps      {sources-sym lib-coord}
+                           :mvn/repos {"central" {:url "https://repo1.maven.org/maven2/"}
+                                       "clojars" {:url "https://repo.clojars.org/"}}}
+              opts        {:verbose   false
+                           :mvn/repos {"central" {:url "https://repo1.maven.org/maven2/"}
+                                       "clojars" {:url "https://repo.clojars.org/"}}}]
+
+          ;; Try to resolve but don't fail if sources don't exist
+          ;; (many Clojure libraries include source in the main jar)
+          (deps/resolve-deps source-deps opts))
+        (catch Exception _
+          ;; Ignore failure to download sources - many libraries don't have them
+          nil)))
+
+    (catch Exception e
+      (throw (ex-info "Error downloading library"
+               {:coords coords} e)))))
 
 (defn class-to-path [^String class-name]
   "Converts a fully-qualified class name to a file path format by replacing dots with slashes.
@@ -134,13 +156,22 @@
    - coords: A map containing Maven coordinates with keys :group-id, :artifact-id, and :version.
 
    Returns:
-   A File object representing the path to the source JAR file.
+   A File object representing the path to the source JAR file, or nil if no source JAR
+   is available. Note that some libraries include source in the main JAR instead of
+   providing a separate source JAR.
 
-   If the source JAR doesn't exist locally, it will attempt to download it
-   using Maven and then return the path to the downloaded file."
+   If the source JAR doesn't exist locally, it will attempt to download it using
+   tools.deps and then return the path to the downloaded file."
   (or (find-source-jar-path coords)
     (do
-      (download-sources coords)
+      ;; Try to download sources, but tolerate failure (some libraries don't have separate source jars)
+      (try
+        (download-sources coords)
+        (catch Exception e
+          (println "Note: Could not download sources for" artifact-id "- source may be included in main jar")
+          nil))
+
+      ;; Check again if we have sources now
       (find-source-jar-path coords))))
 
 (defn strip-html [^String s]
@@ -262,10 +293,10 @@
 
    This function attempts to find the JAR containing the class, parse its Maven
    coordinates, and then ensure the corresponding source JAR is available."
-  (enc/when-let [jar-file (jar-path class-name)
-                 coords   (parse-maven-coords-from-path jar-file)
-                 src-jar  (ensure-sources coords)]
-    src-jar))
+  (when-let [jar-file (jar-path class-name)]
+    (when-let [coords (parse-maven-coords-from-path jar-file)]
+      (when-let [src-jar (ensure-sources coords)]
+        src-jar))))
 
 (defn find-entry-in-jar [^JarFile jar ^String relative-path]
   "Tries to find an entry in a JAR file, handling different Java module path structures.
@@ -369,16 +400,17 @@
             nil)))
 
       ;; For other classes, use the previous approach with Maven source jars
-      (enc/when-let [jar   (some-> (source-jar class-name) (JarFile.))
-                     entry (.getEntry jar java-path)]
-        (with-open [^InputStream stream (.getInputStream jar entry)]
-          (let [cu                (StaticJavaParser/parse stream)
-                class-name-simple (last (str/split class-name #"\."))]
-            (try
-              (.getFirst (.getLocalDeclarationFromClassname cu class-name-simple))
-              (catch Exception e
-                (println "Error extracting declaration for non-JDK class" class-name ":" (.getMessage e))
-                nil))))))))
+      (when-let [src-jar (source-jar class-name)]
+        (when-let [jar (JarFile. src-jar)]
+          (when-let [entry (.getEntry jar java-path)]
+            (with-open [^InputStream stream (.getInputStream jar entry)]
+              (let [cu                (StaticJavaParser/parse stream)
+                    class-name-simple (last (str/split class-name #"\."))]
+                (try
+                  (.getFirst (.getLocalDeclarationFromClassname cu class-name-simple))
+                  (catch Exception e
+                    (println "Error extracting declaration for non-JDK class" class-name ":" (.getMessage e))
+                    nil))))))))))
 
 (defn get-parent-classes [^String class-name]
   "Gets a list of parent class and interface names for a given class.
@@ -461,22 +493,22 @@
    one that contains sufficient documentation for the method."
   (try
     (loop [remaining-parents parent-classes
-           result nil]
+           result            nil]
       (if (or result (empty? remaining-parents))
         result
-        (let [parent-class (first remaining-parents)
-              parent-info (extract-class-info parent-class)
-              parent-methods (:methods parent-info)
+        (let [parent-class    (first remaining-parents)
+              parent-info     (extract-class-info parent-class)
+              parent-methods  (:methods parent-info)
               matching-method (when parent-methods
-                               (first (filter #(= (:name %) method-name) parent-methods)))
-              docs (when matching-method
-                    (select-keys matching-method [:description :params :return]))]
+                                (first (filter #(= (:name %) method-name) parent-methods)))
+              docs            (when matching-method
+                                (select-keys matching-method [:description :params :return]))]
           (recur (rest remaining-parents)
-                (when (and docs
-                          (or (not-empty (:description docs))
-                              (not-empty (:params docs))
-                              (:return docs)))
-                  docs)))))
+            (when (and docs
+                    (or (not-empty (:description docs))
+                      (not-empty (:params docs))
+                      (:return docs)))
+              docs)))))
     (catch Exception e
       (println "Error getting method docs from parents:" (.getMessage e))
       nil)))
@@ -506,10 +538,10 @@
         ;; For each method, try to enrich with docs from parent classes
         (mapv
           (fn [method-doc]
-            (let [method-name (:name method-doc)
+            (let [method-name   (:name method-doc)
                   has-full-docs (and (not-empty (:description method-doc))
-                                    (not-empty (:params method-doc))
-                                    (:return method-doc))]
+                                  (not-empty (:params method-doc))
+                                  (:return method-doc))]
               (if has-full-docs
                 ;; Already has complete docs
                 method-doc
@@ -589,10 +621,10 @@
               (fn [methods]
                 (mapv
                   (fn [method]
-                    (let [method-name (:name method)
+                    (let [method-name  (:name method)
                           missing-docs (or (empty? (:description method))
-                                          (empty? (:params method))
-                                          (nil? (:return method)))]
+                                         (empty? (:params method))
+                                         (nil? (:return method)))]
                       (if missing-docs
                         (if-let [parent-docs (get-method-docs-from-parents method-name parent-classes)]
                           (do
@@ -691,9 +723,9 @@
   [pattern]
   (if pattern
     (-> pattern
-        (str/replace #"\*" ".*")
-        (str/replace #"\?" ".")
-        (as-> p (str "^" p "$")))
+      (str/replace #"\*" ".*")
+      (str/replace #"\?" ".")
+      (as-> p (str "^" p "$")))
     nil))
 
 (defn filter-methods
@@ -730,11 +762,11 @@
   ([^String class-name pattern]
    (let [class-info (describe-class class-name)]
      (if class-info
-       (let [methods (:methods class-info)
+       (let [methods          (:methods class-info)
              filtered-methods (filter-methods methods pattern)]
          (->> filtered-methods
-              (map :declaration)
-              (str/join "\n")))
+           (map :declaration)
+           (str/join "\n")))
        ""))))
 
 ;; Strip javadoc comments function for javasrc

@@ -22,8 +22,7 @@ See https://clojuredocs.org/clojure.repl/source.
 
 ## General Usage
 
-IMPORTANT: This library downloads Java source using Maven (and it issues
-a shell command `mvn` to do so). Make sure you have `mvn` on your PATH (it is available on all platforms, e.g. MacOS Home Brew).
+NOTE: This library downloads Java source using Clojure's tools.deps library.
 
 1. Install an AI tool that supports MCP use, like Roo Code or Claude Code
 2. Add an nREPL MCP server
