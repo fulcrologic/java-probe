@@ -28,6 +28,13 @@ The `finding-java-doc-and-source.md` is a document you can point your AI at to t
 
 You'll also want to give your AI a document to tell it how to find your nREPL port.
 
+## Further Suggestions and Reading
+
+If you install the nrepl-mcp-server
+(https://github.com/JohanCodinha/nrepl-mcp-server) into you AI tool, you can then give you AI instructions like: I have an nREPL running on port X. You can discover the javadoc or source code for Java interop (or .java files in my project) using the nREPL, and you can find instructions for those function calls in `finding-java-doc-and-sources.md` (where you point it at the file from this repo, which you copy into you working source tree).
+
+NOTE: At the time of this writing, the nrepl mcp server had a patch (I contributed) to prevent crashed due to UTF encodings, and NPM had not been updated. So, installing/building it locally is recommended.
+
 ## Status
 
 Just starting to play with it. Contributions welcome. Tested against Java 21. Other versions may have parsing issues.
